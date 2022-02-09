@@ -67,7 +67,15 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import android.os.SystemProperties;
+import android.util.Log;
 
+// CTA Feature: add mms check @{
+import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageManager;
+import android.cta.CtaManifest;
+import android.cta.PermissionUtils;
+// @}
 /**
  * System service to process MMS API requests
  */
@@ -176,6 +184,45 @@ public class MmsService extends Service implements MmsRequest.RequestManager {
         }
     }
 
+public  boolean checktheOperatorIsThailand() {
+        String operator = SystemProperties.get("ro.Thailand.operator");
+        if(TextUtils.isEmpty(operator)){
+            operator = SystemProperties.get("ro.operator");
+        }
+        if(operator != null && operator.toLowerCase().equals("thailand_true")){
+        return true;
+        }
+        return false;
+    }
+    public static final int IS_TRUE_SIM_IN_THAILAND = 10000;
+    public static final int NOT_TRUE_SIM_IN_THAILAND = 10001;
+    public static final int NOT_IN_THAILAND = 10002;
+    public static final int DONOTHING_IN_THAILAND = 10003;
+    public int judgeTrueSIM2(Context mContext,int mSubId) {
+        int PhoneId=SubscriptionManager.getPhoneId(mSubId);
+        Log.w("hzh","send-mms-phone.getPhoneId()"+PhoneId);
+        if(PhoneId==0) {
+            return DONOTHING_IN_THAILAND;
+        }
+        TelephonyManager mmTelephonyManager= (TelephonyManager) mContext.getSystemService(Context.TELEPHONY_SERVICE);
+       // final String MccMnc=mmTelephonyManager.getNetworkOperatorForPhone(1);//for sim2
+       final String MccMnc=mmTelephonyManager.getSimOperatorNumericForPhone(1);
+        final String Mcc=MccMnc.substring(0,3);
+        final String Mnc=MccMnc.substring(3);
+
+        Log.w("hzh","send-mms-Mcc"+Mcc+"Mnc"+Mnc);
+        if(MccMnc==null) {
+            return DONOTHING_IN_THAILAND;
+        }
+        if(!Mcc.equals("520")) {
+            return NOT_IN_THAILAND;
+        }
+        if(Mnc.equals("00")||Mnc.equals("04")||Mnc.equals("99")) {
+            return IS_TRUE_SIM_IN_THAILAND;
+        } else {
+            return NOT_TRUE_SIM_IN_THAILAND;
+        }
+    }
     private IMms.Stub mStub = new IMms.Stub() {
         @Override
         public void sendMessage(int subId, String callingPkg, Uri contentUri,
@@ -185,7 +232,13 @@ public class MmsService extends Service implements MmsRequest.RequestManager {
 
             // Make sure the subId is correct
             subId = checkSubId(subId);
-
+          if(checktheOperatorIsThailand()){
+          if(judgeTrueSIM2(MmsService.this,subId)==NOT_TRUE_SIM_IN_THAILAND||judgeTrueSIM2(MmsService.this,subId)==NOT_IN_THAILAND)
+          {
+             sendErrorInPendingIntent(sentIntent);
+              return;
+          }
+          }
             // Make sure the subId is active
             if (!isActiveSubId(subId)) {
                 sendErrorInPendingIntent(sentIntent);
@@ -200,6 +253,13 @@ public class MmsService extends Service implements MmsRequest.RequestManager {
                 sendErrorInPendingIntent(sentIntent);
                 return;
             }
+
+            // CTA Feature: call mms checkCtaPermission @{
+            if (!checkPermIfCtaFeatureEnabled(callingPkg)) {
+                LogUtil.w("[sendMessage]CTA permission denied: subId " + subId +", callingPkg " + callingPkg);
+                return;
+            }
+            // @}
 
             final SendRequest request = new SendRequest(MmsService.this, subId, contentUri,
                     locationUrl, sentIntent, callingPkg, configOverrides, MmsService.this);
@@ -412,6 +472,35 @@ public class MmsService extends Service implements MmsRequest.RequestManager {
         }
     };
 
+    // CTA Feature: add mms check @{
+    private boolean checkPermIfCtaFeatureEnabled(String callingPkg) {
+        if (PermissionUtils.isCtaFeatureSupported()) {
+            int callPkgUid = getUidByPkgName(callingPkg);
+            LogUtil.d("[checkPermIfCtaFeatureEnabled]callingPkg: " + callingPkg + ", callPkgUid: " + callPkgUid);
+            boolean checkRet = PermissionUtils.checkCtaPermission(CtaManifest.Permission.CTA_SEND_MMS, callPkgUid, callingPkg);
+            if (!checkRet) {
+                LogUtil.w("[checkPermIfCtaFeatureEnabled]permission CTA_SEND_MMS denied");
+                return false;
+            }
+            if (PermissionUtils.isCtaLogEnabled()) {
+                LogUtil.d("[checkPermIfCtaFeatureEnabled]permission CTA_SEND_MMS allowed");
+            }
+        }
+        return true;
+    }
+
+    private int getUidByPkgName(String pkgName) {
+        PackageManager mPm = getPackageManager();
+        try {
+            ApplicationInfo applicationInfo = mPm.getApplicationInfo(pkgName, 0);
+            return applicationInfo.uid;
+        } catch (Exception e){
+            e.printStackTrace();
+        }
+        return -1;
+    }
+    // @}
+
     @Override
     public void addSimRequest(MmsRequest request) {
         if (request == null) {
@@ -468,7 +557,7 @@ public class MmsService extends Service implements MmsRequest.RequestManager {
             @Override
             public void run() {
                 try {
-                    request.execute(MmsService.this, getNetworkManager(request.getSubId()));
+                    request.execute(MmsService.this, getNetworkManager(request.getSubId()),true);
                 } finally {
                     synchronized (MmsService.this) {
                         mRunningRequestCount--;
